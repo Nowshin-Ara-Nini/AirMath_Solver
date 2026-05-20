@@ -1,0 +1,14 @@
+# Virtual Environment
+air_env/
+venv/
+env/
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# VS Code
+.vscode/
+
+# Temporary files
+temp/
