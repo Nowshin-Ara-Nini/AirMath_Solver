@@ -74,6 +74,7 @@ class ExpressionParser:
         }
         for old, new in replacements.items():
             expr = expr.replace(old, new)
+        expr = re.sub(r"(?<=\d)[xX](?=\d)", "*", expr)
         expr = expr.replace("^", "**")
         expr = re.sub(r"\bln\b", "log", expr)
         expr = re.sub(r"\s+", "", expr)

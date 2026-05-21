@@ -1,6 +1,6 @@
 # Air Math Solver
 
-CPU-friendly webcam app for drawing math expressions in the air with your finger, recognizing them with Mathpix OCR, and evaluating them with SymPy.
+CPU-friendly webcam app for drawing math expressions in the air with your finger, recognizing simple arithmetic locally, optionally using Mathpix OCR for advanced expressions, and evaluating results with SymPy.
 
 ## Setup
 
@@ -10,7 +10,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env` and add your Mathpix credentials:
+Local OCR works without cloud credentials for simple digits and operators. For advanced OCR, copy `.env.example` to `.env` and add your Mathpix credentials:
 
 ```env
 MATHPIX_APP_ID=your_app_id_here
@@ -29,23 +29,23 @@ python main.py
 
 ## Controls
 
-- Raise only your index finger to draw.
-- Raise index + middle finger to erase, or hover over `ERASER`.
-- Hover your fingertip over toolbar buttons to click: `CLEAR`, `ERASER`, `EVALUATE`, `QUIT`.
-- Keyboard fallbacks: `c` clear, `z` undo, `e` or space evaluate, `r` eraser, `q` quit.
+- Raise your index finger to draw.
+- Press `R` or hover over `ERASER` to toggle eraser mode; then use your index finger to erase.
+- Hover your fingertip over toolbar buttons to click: `CLEAR`, `UNDO`, `ERASER`, `EVALUATE`, `QUIT`.
+- Keyboard fallbacks: `c` clear, `z` undo, `d` debug overlay, `e` or space evaluate, `r` eraser, `q` quit.
 
 ## CPU Notes
 
 - Webcam resolution is fixed at `640x480`.
 - MediaPipe Hands runs with `model_complexity=0` and one hand.
-- No TensorFlow, PyTorch, transformer, or local OCR inference is used.
+- No TensorFlow, PyTorch, transformer, or heavy OCR inference is used.
 - OCR happens only when you press `EVALUATE`, so the live webcam loop stays light.
 
 ## OCR Architecture
 
-`ocr_engine.py` defines `BaseOCREngine` and `OCRResult`. The rest of the app only depends on that interface, so a future OCR backend such as pix2tex, TrOCR, or a custom CNN can replace `MathpixOCREngine` without changing drawing, parsing, or evaluation code.
+`ocr_engine.py` defines `BaseOCREngine` and `OCRResult`. The app uses a hybrid engine: Mathpix runs when configured, and a local OpenCV recognizer handles simple handwritten digits/operators when Mathpix is missing or unavailable.
 
-If Mathpix credentials are missing or the API request fails, the error is shown inside the OpenCV window and the app keeps running.
+If Mathpix credentials are missing, the app keeps running with local simple OCR instead of treating OCR as fully unavailable.
 
 ## Supported Examples
 

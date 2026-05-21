@@ -27,10 +27,17 @@ class AppConfig:
     target_fps: int = 30
     toolbar_height: int = 64
     panel_height: int = 72
-    brush_size: int = 10
-    eraser_size: int = 34
-    smoothing_alpha: float = 0.38
+    brush_size: int = 7
+    eraser_size: int = 28
+    smoothing_alpha: float = 0.30
     click_cooldown_s: float = 0.75
+    detection_confidence: float = 0.75
+    tracking_confidence: float = 0.75
+    jump_threshold_px: float = 55.0
+    hold_missing_frames: int = 3
+    enhance_low_light: bool = True
+    denoise_frame: bool = False
+    debug_enabled: bool = False
 
 
 CONFIG = AppConfig()
@@ -121,6 +128,27 @@ def alpha_blend(base_bgr: np.ndarray, overlay_bgra: np.ndarray) -> np.ndarray:
     alpha = overlay_bgra[:, :, 3:4].astype(np.float32) / 255.0
     blended = base_bgr.astype(np.float32) * (1.0 - alpha) + overlay_bgra[:, :, :3].astype(np.float32) * alpha
     return blended.astype(np.uint8)
+
+
+def enhance_frame_for_tracking(frame_bgr: np.ndarray) -> np.ndarray:
+    """Apply light CPU-only enhancement for dark/noisy webcam frames."""
+    if not CONFIG.enhance_low_light:
+        return frame_bgr
+
+    ycrcb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2YCrCb)
+    y, cr, cb = cv2.split(ycrcb)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    y = clahe.apply(y)
+    enhanced = cv2.cvtColor(cv2.merge((y, cr, cb)), cv2.COLOR_YCrCb2BGR)
+
+    mean_luma = float(y.mean())
+    if mean_luma < 105.0:
+        beta = 20 if mean_luma < 75.0 else 12
+        enhanced = cv2.convertScaleAbs(enhanced, alpha=1.06, beta=beta)
+
+    if CONFIG.denoise_frame:
+        enhanced = cv2.fastNlMeansDenoisingColored(enhanced, None, 4, 4, 7, 15)
+    return enhanced
 
 
 def latest_temp_image_path(prefix: str = "air_math_canvas") -> Path:

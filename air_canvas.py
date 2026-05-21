@@ -52,7 +52,17 @@ class AirCanvas:
         lx, ly = self._last_point
         x, y = point
         distance = math.hypot(x - lx, y - ly)
-        steps = max(1, int(distance / 4))
+        if distance > CONFIG.jump_threshold_px:
+            mode = self.current.mode
+            color = self.current.color
+            size = self.current.size
+            self.end_stroke()
+            self.current = Stroke(color=color, size=size, mode=mode)
+            self.current.points.append(point)
+            self._last_point = point
+            return
+
+        steps = max(1, int(distance / 3))
         for step in range(1, steps + 1):
             t = step / steps
             px = int(lx + (x - lx) * t)
@@ -64,6 +74,10 @@ class AirCanvas:
         if self.current and len(self.current.points) > 1:
             self.strokes.append(self.current)
         self.current = None
+        self._last_point = None
+
+    def pause_stroke(self) -> None:
+        """Keep the current stroke active, but avoid connecting across a tracking gap."""
         self._last_point = None
 
     def undo(self) -> None:
@@ -100,13 +114,14 @@ class AirCanvas:
     def save_for_ocr(self, path: Path) -> bool:
         self.end_stroke()
         image = self._render_ocr_image()
-        mask = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) < 245
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        mask = gray > 5
         coords = cv2.findNonZero(mask.astype(np.uint8))
         if coords is None:
             return False
 
         x, y, w, h = cv2.boundingRect(coords)
-        pad = 30
+        pad = max(36, CONFIG.brush_size * 4)
         x1 = max(0, x - pad)
         y1 = max(0, y - pad)
         x2 = min(self.width, x + w + pad)
@@ -114,13 +129,25 @@ class AirCanvas:
         crop = image[y1:y2, x1:x2]
         if crop.size == 0:
             return False
+
+        crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(crop_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=1)
+        crop = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+
+        min_side = min(crop.shape[:2])
+        if min_side < 220:
+            scale = 220 / max(1, min_side)
+            crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
+        crop = cv2.copyMakeBorder(crop, 32, 32, 32, 32, cv2.BORDER_CONSTANT, value=(0, 0, 0))
         path.parent.mkdir(exist_ok=True)
         return bool(cv2.imwrite(str(path), crop))
 
     def _render_ocr_image(self) -> np.ndarray:
-        image = np.full((self.height, self.width, 3), 255, dtype=np.uint8)
+        image = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         for stroke in self.strokes:
-            color = (255, 255, 255) if stroke.mode == "erase" else (0, 0, 0)
+            color = (0, 0, 0) if stroke.mode == "erase" else (255, 255, 255)
             self._draw_polyline(image, stroke.points, color, stroke.size)
         return image
 

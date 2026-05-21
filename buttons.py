@@ -90,18 +90,23 @@ class Toolbar:
             self._draw_button(frame, button, hover == button.action, mode)
 
         mode_color = COLOR_ERASE if mode == "ERASER" else COLOR_DRAW
-        cv2.circle(frame, (472, 31), 7, mode_color, -1, cv2.LINE_AA)
-        draw_text(frame, f"MODE: {mode}", (486, 36), 0.45, COLOR_TEXT, 1)
-        draw_text(frame, status[:28], (486, 55), 0.38, COLOR_MUTED, 1)
+        cv2.circle(frame, (490, 31), 7, mode_color, -1, cv2.LINE_AA)
+        draw_text(frame, f"MODE: {mode}", (504, 36), 0.42, COLOR_TEXT, 1)
+        draw_text(frame, status[:24], (504, 55), 0.35, COLOR_MUTED, 1)
 
     def _layout_buttons(self) -> List[Button]:
-        labels = [("CLEAR", "CLEAR C"), ("ERASER", "ERASER R"), ("EVALUATE", "EVAL E/SPACE"), ("QUIT", "QUIT Q")]
+        labels = [
+            ("CLEAR", "CLEAR C", 76),
+            ("UNDO", "UNDO Z", 78),
+            ("ERASER", "ERASER R", 88),
+            ("EVALUATE", "EVAL E/SPACE", 116),
+            ("QUIT", "QUIT Q", 72),
+        ]
         x = 12
         buttons: List[Button] = []
-        for action, label in labels:
-            width = 128 if action == "EVALUATE" else 98
+        for action, label, width in labels:
             buttons.append(Button(action=action, label=label, rect=(x, 14, width, 36)))
-            x += width + 10
+            x += width + 8
         return buttons
 
     def _draw_button(self, frame: np.ndarray, button: Button, hovered: bool, mode: str) -> None:

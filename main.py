@@ -1,7 +1,7 @@
 """Air Math Solver entrypoint.
 
 Real-time webcam app:
-webcam -> MediaPipe hand tracking -> air canvas -> Mathpix OCR -> parser -> SymPy.
+webcam -> MediaPipe hand tracking -> air canvas -> OCR -> parser -> SymPy.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from buttons import Toolbar
 from evaluator import SympyEvaluator
 from expression_parser import ExpressionParser
 from hand_tracker import HandState, HandTracker
-from ocr_engine import MathpixOCREngine, OCRResult
+from ocr_engine import HybridOCREngine, OCRResult
 from utils import (
     COLOR_ACCENT,
     COLOR_BG,
@@ -31,6 +31,7 @@ from utils import (
     alpha_blend,
     draw_fitted_text,
     draw_text,
+    enhance_frame_for_tracking,
     ensure_project_dirs,
     latest_temp_image_path,
 )
@@ -44,7 +45,7 @@ class AirMathApp:
         self.canvas = AirCanvas(CONFIG.frame_width, CONFIG.frame_height)
         self.toolbar = Toolbar(CONFIG.frame_width)
         self.hand_tracker = HandTracker()
-        self.ocr_engine = MathpixOCREngine()
+        self.ocr_engine = HybridOCREngine()
         self.parser = ExpressionParser()
         self.evaluator = SympyEvaluator()
         self.fps_counter = FPSCounter()
@@ -57,9 +58,14 @@ class AirMathApp:
         self.confidence = 0.0
         self.history: List[Tuple[str, str]] = []
         self.last_snapshot = ""
+        self.debug_enabled = CONFIG.debug_enabled
+        self.current_fps = 0.0
+        self.jump_rejections = 0
+        self._last_gesture = "idle"
+        self.last_ocr_preview: np.ndarray | None = None
         if not self.ocr_engine.is_configured():
-            self.status = "OCR setup needed"
-            self.answer = "OCR needs Mathpix keys"
+            self.status = "Local OCR ready"
+            self.answer = "Draw simple math"
 
     def run(self) -> None:
         cap = cv2.VideoCapture(CONFIG.camera_index)
@@ -84,7 +90,10 @@ class AirMathApp:
 
                 frame = cv2.resize(frame, (CONFIG.frame_width, CONFIG.frame_height))
                 frame = cv2.flip(frame, 1)
-                hand_state = self.hand_tracker.process(frame)
+                display_frame = enhance_frame_for_tracking(frame)
+                hand_state = self.hand_tracker.process(display_frame)
+                if hand_state.jump_rejected:
+                    self.jump_rejections += 1
                 pointer = hand_state.smoothed_index_tip if hand_state.found and not hand_state.tracking_lost else None
 
                 action = self.toolbar.update(pointer)
@@ -92,7 +101,7 @@ class AirMathApp:
                     running = self._handle_action(action)
 
                 self._update_canvas_from_hand(hand_state)
-                display = self._render(frame, hand_state)
+                display = self._render(display_frame, hand_state)
                 cv2.imshow(CONFIG.window_name, display)
 
                 key = cv2.waitKey(1) & 0xFF
@@ -107,12 +116,18 @@ class AirMathApp:
     def _update_canvas_from_hand(self, hand_state: HandState) -> None:
         if not hand_state.found or hand_state.smoothed_index_tip is None:
             self.canvas.end_stroke()
+            self._last_gesture = "lost"
             return
         if hand_state.tracking_lost:
             self.canvas.end_stroke()
+            self._last_gesture = hand_state.gesture
             if self.status in {"Drawing", "Erasing"}:
                 self.status = "Tracking hand..."
             return
+
+        if hand_state.gesture != self._last_gesture:
+            self.canvas.end_stroke()
+            self._last_gesture = hand_state.gesture
 
         point = hand_state.smoothed_index_tip
         hovering_toolbar = self.toolbar.hovered_action(point) is not None
@@ -121,8 +136,8 @@ class AirMathApp:
             self.canvas.end_stroke()
             return
 
-        should_erase = hand_state.erasing or (self.mode == "ERASER" and hand_state.drawing)
-        should_draw = self.mode == "DRAW" and hand_state.drawing and not hand_state.erasing
+        should_erase = self.mode == "ERASER" and hand_state.drawing
+        should_draw = self.mode == "DRAW" and hand_state.drawing
 
         if should_erase:
             self.canvas.begin_stroke("erase", size=CONFIG.eraser_size)
@@ -143,8 +158,10 @@ class AirMathApp:
         self._draw_info_panel(display, hand_state)
         toolbar_pointer = hand_state.smoothed_index_tip if hand_state.found and not hand_state.tracking_lost else None
         self.toolbar.render(display, toolbar_pointer, self.mode, self.status)
-        fps = self.fps_counter.tick()
-        draw_text(display, f"{fps:4.0f} FPS", (570, 36), 0.42, COLOR_MUTED, 1)
+        self.current_fps = self.fps_counter.tick()
+        draw_text(display, f"{self.current_fps:4.0f} FPS", (570, 36), 0.42, COLOR_MUTED, 1)
+        if self.debug_enabled:
+            self._draw_debug_overlay(display, hand_state)
         return display
 
     def _draw_pointer(self, frame: np.ndarray, hand_state: HandState) -> None:
@@ -154,8 +171,9 @@ class AirMathApp:
         if hand_state.tracking_lost:
             color = COLOR_MUTED
         else:
-            color = COLOR_ERASE if self.mode == "ERASER" or hand_state.erasing else COLOR_ACCENT
-        cv2.circle(frame, point, 16, color, 2, cv2.LINE_AA)
+            color = COLOR_ERASE if self.mode == "ERASER" else COLOR_ACCENT
+        confidence_radius = 11 + int(max(0.0, min(1.0, hand_state.tracking_confidence)) * 7)
+        cv2.circle(frame, point, confidence_radius, color, 2, cv2.LINE_AA)
         cv2.circle(frame, point, 5, color, -1, cv2.LINE_AA)
 
     def _draw_info_panel(self, frame: np.ndarray, hand_state: HandState) -> None:
@@ -169,7 +187,6 @@ class AirMathApp:
         is_problem = (
             str(self.answer).startswith("Error")
             or "setup needed" in answer_lower
-            or "mathpix keys" in answer_lower
             or self.status in {"OCR error", "OCR setup needed", "Parse error", "Math error"}
         )
         result_color = COLOR_ACCENT if not is_problem else COLOR_ERROR
@@ -181,7 +198,26 @@ class AirMathApp:
         draw_text(frame, f"Conf {int(self.confidence * 100):02d}%", (500, top + 21), 0.42, COLOR_MUTED, 1)
         status = "Tracking..." if hand_state.tracking_lost else self.status
         draw_fitted_text(frame, status, (500, top + 45), 122, 0.4, COLOR_WARN if is_problem else COLOR_MUTED, 1)
-        draw_text(frame, "Keys: C clear | R eraser | Z undo | E/Space eval | Q quit", (14, top + 66), 0.34, COLOR_WARN, 1)
+        draw_text(frame, "Keys: C clear | R eraser | Z undo | D debug | E/Space eval | Q quit", (14, top + 66), 0.32, COLOR_WARN, 1)
+
+    def _draw_debug_overlay(self, frame: np.ndarray, hand_state: HandState) -> None:
+        lines = [
+            f"DEBUG fps={self.current_fps:.0f}",
+            f"gesture={hand_state.gesture} conf={hand_state.tracking_confidence:.2f}",
+            f"lost={hand_state.lost_frames} jump={hand_state.jump_rejected} total={self.jump_rejections}",
+            f"tip={hand_state.smoothed_index_tip}",
+        ]
+        x, y = 8, CONFIG.toolbar_height + 18
+        for index, line in enumerate(lines):
+            draw_text(frame, line, (x, y + index * 18), 0.38, COLOR_WARN, 1)
+
+        if self.last_ocr_preview is not None:
+            preview = self.last_ocr_preview
+            ph, pw = preview.shape[:2]
+            px = CONFIG.frame_width - pw - 8
+            py = CONFIG.toolbar_height + 8
+            frame[py : py + ph, px : px + pw] = preview
+            cv2.rectangle(frame, (px, py), (px + pw, py + ph), COLOR_WARN, 1)
 
     def _handle_action(self, action: str) -> bool:
         if action == "CLEAR":
@@ -191,6 +227,9 @@ class AirMathApp:
             self.answer = "Canvas cleared"
             self.confidence = 0.0
             self.status = "Ready"
+        elif action == "UNDO":
+            self.canvas.undo()
+            self.status = "Undo"
         elif action == "ERASER":
             self.canvas.end_stroke()
             self.mode = "DRAW" if self.mode == "ERASER" else "ERASER"
@@ -207,14 +246,16 @@ class AirMathApp:
         if key in (ord("c"), ord("C")):
             return self._handle_action("CLEAR")
         if key in (ord("z"), ord("Z")):
-            self.canvas.undo()
-            self.status = "Undo"
-            return True
+            return self._handle_action("UNDO")
         if key in (ord("e"), ord("E"), ord(" ")):
             self.evaluate_canvas()
             return True
         if key in (ord("r"), ord("R")):
             return self._handle_action("ERASER")
+        if key in (ord("d"), ord("D")):
+            self.debug_enabled = not self.debug_enabled
+            self.status = "Debug on" if self.debug_enabled else "Debug off"
+            return True
         return True
 
     def evaluate_canvas(self) -> None:
@@ -233,16 +274,26 @@ class AirMathApp:
             return
 
         self.last_snapshot = image_path.name
-        self.status = "Calling Mathpix"
+        self._update_ocr_preview(image_path)
+        self.status = "Calling Mathpix" if self.ocr_engine.is_configured() else "Reading locally"
         ocr_result = self.ocr_engine.recognize(image_path)
         self._apply_ocr_result(ocr_result)
 
+    def _update_ocr_preview(self, image_path: object) -> None:
+        preview = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+        if preview is None:
+            self.last_ocr_preview = None
+            return
+        preview = cv2.cvtColor(preview, cv2.COLOR_GRAY2BGR)
+        preview = cv2.resize(preview, (120, 80), interpolation=cv2.INTER_AREA)
+        self.last_ocr_preview = preview
+
     def _apply_ocr_result(self, ocr_result: OCRResult) -> None:
         if ocr_result.error:
-            self.status = "OCR setup needed" if "setup needed" in ocr_result.error.lower() else "OCR error"
+            self.status = "OCR error"
             self.raw_expression = "-"
             self.clean_expression = "-"
-            self.answer = "OCR needs Mathpix keys" if "setup needed" in ocr_result.error.lower() else ocr_result.error
+            self.answer = ocr_result.error
             self.confidence = 0.0
             return
 
@@ -261,7 +312,10 @@ class AirMathApp:
         self.clean_expression = parse_result.expression
         self.answer = evaluation.answer
         self.confidence = max(0.0, min(1.0, ocr_result.confidence * evaluation.confidence))
-        self.status = "Ready" if evaluation.success else "Math error"
+        source = ""
+        if ocr_result.raw_response and ocr_result.raw_response.get("source"):
+            source = f" ({ocr_result.raw_response['source']})"
+        self.status = f"Ready{source}" if evaluation.success else "Math error"
         if evaluation.success:
             self.history.append((parse_result.expression, evaluation.answer))
             self.history = self.history[-8:]

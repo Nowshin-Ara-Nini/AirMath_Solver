@@ -73,6 +73,8 @@ class SympyEvaluator:
 
     @staticmethod
     def _format_answer(value: sp.Expr) -> str:
+        if value in (sp.S.true, sp.S.false):
+            return str(bool(value))
         if isinstance(value, sp.Equality):
             return str(value)
         if value.free_symbols:
